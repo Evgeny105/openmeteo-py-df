@@ -1,9 +1,8 @@
 # OpenMeteo Python Client
 
 [![CI](https://github.com/Evgeny105/openmeteo-py-df/actions/workflows/ci.yml/badge.svg)](https://github.com/Evgeny105/openmeteo-py-df/actions/workflows/ci.yml)
-[![PyPI version](https://img.shields.io/pypi/v/openmeteo.svg)](https://pypi.org/project/openmeteo/)
-[![Python versions](https://img.shields.io/pypi/pyversions/openmeteo.svg)](https://pypi.org/project/openmeteo/)
-[![Coverage](https://img.shields.io/badge/coverage-93%25-brightgreen)](https://github.com/Evgeny105/openmeteo-py-df)
+[![PyPI version](https://img.shields.io/pypi/v/openmeteo-py-df.svg)](https://pypi.org/project/openmeteo-py-df/)
+[![Python versions](https://img.shields.io/pypi/pyversions/openmeteo-py-df.svg)](https://pypi.org/project/openmeteo-py-df/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Async Python client for OpenMeteo API with historical data caching and DataFrame support.
