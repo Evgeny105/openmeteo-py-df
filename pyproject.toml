@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openmeteo"
+version = "1.0.0"
+description = "Async OpenMeteo API client with historical data caching and DataFrame support"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{name = "Evgeny"}]
+keywords = ["weather", "openmeteo", "api", "async", "forecast", "historical", "pandas", "dataframe"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Framework :: AsyncIO",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
+dependencies = [
+    "httpx>=0.24.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dataframe = ["pandas>=2.0.0"]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Evgeny105/openmeteo-py-df"
+Repository = "https://github.com/Evgeny105/openmeteo-py-df"
+Issues = "https://github.com/Evgeny105/openmeteo-py-df/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openmeteo"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--cov=openmeteo --cov-fail-under=90 --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["src/openmeteo"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
