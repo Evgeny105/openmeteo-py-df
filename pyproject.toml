@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "openmeteo"
+name = "openmeteo-py-df"
 version = "1.0.0"
 description = "Async OpenMeteo API client with historical data caching and DataFrame support"
 readme = "README.md"

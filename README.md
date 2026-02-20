@@ -24,10 +24,10 @@ Async Python client for OpenMeteo API with historical data caching and DataFrame
 ## Installation
 
 ```bash
-pip install openmeteo
+pip install openmeteo-py-df
 
 # With DataFrame support
-pip install "openmeteo[dataframe]"
+pip install "openmeteo-py-df[dataframe]"
 ```
 
 ## Quick Start
