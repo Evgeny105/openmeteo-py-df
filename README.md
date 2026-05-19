@@ -248,4 +248,4 @@ MIT License - see [LICENSE](LICENSE)
 
 - [OpenMeteo API Documentation](https://open-meteo.com/en/docs)
 - [GitHub Repository](https://github.com/Evgeny105/openmeteo-py-df)
-- [PyPI Package](https://pypi.org/project/openmeteo/)
+- [PyPI Package](https://pypi.org/project/openmeteo-py-df/)

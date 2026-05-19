@@ -84,7 +84,7 @@ See Also:
     - GisMeteo module for Russian forecasts with water temperature
 """
 
-from .client import OpenMeteoClient
+from .client import CURRENT_VARIABLES, DAILY_VARIABLES, HOURLY_VARIABLES, OpenMeteoClient
 from .exceptions import (
     OpenMeteoAPIError,
     OpenMeteoCacheError,
@@ -132,4 +132,7 @@ __all__ = [
     "MAX_FORECAST_DAYS",
     "CACHE_SAFETY_MARGIN_HOURS",
     "HISTORY_RECENT_DAYS",
+    "HOURLY_VARIABLES",
+    "DAILY_VARIABLES",
+    "CURRENT_VARIABLES",
 ]
