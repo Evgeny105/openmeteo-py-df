@@ -16,4 +16,8 @@ venv/
 .vscode/
 *.egg
 MANIFEST
-plan.md
+
+# Local-only planning repos and generated agent files (kept out of the public repo)
+docs/
+openspec/
+.claude/
