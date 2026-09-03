@@ -9,15 +9,19 @@ Key features:
     - 16-day weather forecast
     - Current weather conditions
     - Same variables for historical and forecast (ideal for ML)
-    - Smart caching: JSON files for historical (accumulates), memory for forecast
+    - Pluggable cache backends: files, memory, Redis (shared between replicas)
+    - Retries with exponential backoff for transient API failures
     - Global coverage, no API key required
     - Optional DataFrame conversion via openmeteo.dataframe module
 
 Caching strategy:
-    - **Historical data**: Persisted to JSON files per location per month.
-      Only missing months are fetched. Data accumulates indefinitely.
-    - **Forecast data**: In-memory cache with TTL and data freshness checks.
-      Automatically refreshes when approaching forecast end.
+    - **Historical data**: One cache entry per location per month with
+      coverage metadata. Only missing, incomplete or stale months are fetched.
+    - **Forecast data**: Cached with TTL and dropped when the forecast
+      horizon is near.
+    - **Backend**: files by default (``~/.cache/openmeteo``), in-memory
+      fallback on a read-only filesystem, Redis via
+      ``OPENMETEO_CACHE_URL=redis://...`` or ``OpenMeteoClient(cache_url=...)``.
 
 DataFrame conversion:
     For pandas DataFrame output, use the dataframe submodule::
@@ -81,17 +85,24 @@ Example:
 
 See Also:
     - OpenMeteo API docs: https://open-meteo.com/en/docs
-    - GisMeteo module for Russian forecasts with water temperature
 """
+
+from importlib.metadata import PackageNotFoundError, version
 
 from .client import CURRENT_VARIABLES, DAILY_VARIABLES, HOURLY_VARIABLES, OpenMeteoClient
 from .exceptions import (
     OpenMeteoAPIError,
     OpenMeteoCacheError,
     OpenMeteoConnectionError,
+    OpenMeteoDataError,
     OpenMeteoError,
     OpenMeteoValidationError,
 )
+
+try:
+    __version__ = version("openmeteo-py-df")
+except PackageNotFoundError:  # pragma: no cover - source checkout without install
+    __version__ = "0.0.0"
 from .models import (
     CurrentData,
     CurrentResponse,
@@ -102,6 +113,7 @@ from .models import (
 )
 from .types import (
     ARCHIVE_BASE_URL,
+    ARCHIVE_LAG_DAYS,
     CACHE_SAFETY_MARGIN_HOURS,
     DEFAULT_FORECAST_DAYS,
     DEFAULT_TTL_MINUTES,
@@ -125,7 +137,10 @@ __all__ = [
     "OpenMeteoConnectionError",
     "OpenMeteoValidationError",
     "OpenMeteoCacheError",
+    "OpenMeteoDataError",
+    "__version__",
     "ARCHIVE_BASE_URL",
+    "ARCHIVE_LAG_DAYS",
     "FORECAST_BASE_URL",
     "DEFAULT_FORECAST_DAYS",
     "DEFAULT_TTL_MINUTES",

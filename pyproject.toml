@@ -28,10 +28,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dataframe = ["pandas>=2.0.0"]
+redis = ["redis>=5.0.0"]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
+    "fakeredis>=2.20.0",
 ]
 
 [project.urls]

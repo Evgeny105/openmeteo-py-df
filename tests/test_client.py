@@ -1,731 +1,409 @@
+"""Tests for OpenMeteoClient: validation, lifecycle, forecast, current, historical."""
+
+import asyncio
+from datetime import date, timedelta
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from datetime import date, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
-from pathlib import Path
-import tempfile
-import os
 
 from openmeteo import (
-    OpenMeteoClient,
-    TimeStep,
-    OpenMeteoAPIError,
-    OpenMeteoConnectionError,
-    OpenMeteoValidationError,
-)
-from openmeteo.models import (
-    HourlyResponse,
     DailyResponse,
-    CurrentResponse,
-    HourlyData,
-    DailyData,
-    HourlyUnits,
-    DailyUnits,
+    HourlyResponse,
+    OpenMeteoAPIError,
+    OpenMeteoClient,
+    OpenMeteoConnectionError,
+    OpenMeteoDataError,
+    OpenMeteoValidationError,
+    TimeStep,
 )
-from openmeteo.cache import (
-    HistoricalCache,
-    ForecastCache,
-    _coord_key,
-    _month_key,
-    _parse_date,
-)
+from openmeteo.cache import HistoryKey, MemoryBackend
+from openmeteo.models import CurrentResponse
+
+META = {
+    "latitude": 55.75,
+    "longitude": 37.62,
+    "elevation": 130.0,
+    "generationtime_ms": 0.5,
+    "utc_offset_seconds": 10800,
+    "timezone": "Europe/Moscow",
+    "timezone_abbreviation": "MSK",
+}
+
+
+def hourly_response(times, **series):
+    return {**META, "hourly_units": {"time": "iso8601"}, "hourly": {"time": list(times), **series}}
+
+
+def daily_response(times, **series):
+    return {**META, "daily_units": {"time": "iso8601"}, "daily": {"time": list(times), **series}}
+
+
+def month_hours(start: date, end: date):
+    out = []
+    d = start
+    while d <= end:
+        out.extend(f"{d.isoformat()}T{h:02d}:00" for h in range(24))
+        d += timedelta(days=1)
+    return out
+
+
+def archive_stub(variables_per_month=None, record=None):
+    """Build a _fetch replacement answering archive requests month by month."""
+
+    async def fetch(url, params):
+        if record is not None:
+            record.append(params)
+        start, end = date.fromisoformat(params["start_date"]), date.fromisoformat(params["end_date"])
+        requested = params["hourly"].split(",")
+        month = start.strftime("%Y-%m")
+        available = (variables_per_month or {}).get(month, requested)
+        times = month_hours(start, end)
+        series = {v: [float(i) for i in range(len(times))] for v in requested if v in available}
+        return hourly_response(times, **series)
+
+    return fetch
+
+
+@pytest.fixture
+def client():
+    return OpenMeteoClient(cache=MemoryBackend())
 
 
 class TestValidation:
-    def test_valid_coordinates(self):
-        client = OpenMeteoClient()
-        client._validate_coordinates(0.0, 0.0)
-        client._validate_coordinates(55.782298, 37.327136)
-        client._validate_coordinates(-90.0, -180.0)
-        client._validate_coordinates(90.0, 180.0)
-        client._validate_coordinates(45.5, -122.5)
+    def test_valid_coordinates(self, client):
+        client._validate_coordinates(55.75, 37.62)
 
-    def test_invalid_latitude_too_high(self):
-        client = OpenMeteoClient()
-        with pytest.raises(OpenMeteoValidationError) as exc_info:
-            client._validate_coordinates(91.0, 0.0)
-        assert "Latitude must be in range [-90.0, 90.0]" in str(exc_info.value)
+    @pytest.mark.parametrize("lat,lon", [(91.0, 0.0), (-91.0, 0.0), (0.0, 181.0), (0.0, -181.0)])
+    def test_invalid_coordinates(self, client, lat, lon):
+        with pytest.raises(OpenMeteoValidationError):
+            client._validate_coordinates(lat, lon)
 
-    def test_invalid_latitude_too_low(self):
-        client = OpenMeteoClient()
-        with pytest.raises(OpenMeteoValidationError) as exc_info:
-            client._validate_coordinates(-91.0, 0.0)
-        assert "Latitude must be in range [-90.0, 90.0]" in str(exc_info.value)
+    def test_valid_date_range(self, client):
+        client._validate_date_range(date(2024, 1, 1), date(2024, 1, 31))
 
-    def test_invalid_longitude_out_of_range(self):
-        client = OpenMeteoClient()
-        with pytest.raises(OpenMeteoValidationError) as exc_info:
-            client._validate_coordinates(0.0, 181.0)
-        assert "Longitude must be in range [-180.0, 180.0]" in str(exc_info.value)
+    def test_start_after_end(self, client):
+        with pytest.raises(OpenMeteoValidationError):
+            client._validate_date_range(date(2024, 2, 1), date(2024, 1, 1))
 
-    def test_valid_date_range(self):
-        client = OpenMeteoClient()
-        today = date.today()
-        client._validate_date_range(today - timedelta(days=10), today)
+    def test_future_end_rejected(self, client):
+        with pytest.raises(OpenMeteoValidationError):
+            client._validate_date_range(date(2024, 1, 1), date(2100, 1, 1))
 
-    def test_invalid_date_range_start_after_end(self):
-        client = OpenMeteoClient()
-        today = date.today()
-        with pytest.raises(OpenMeteoValidationError) as exc_info:
-            client._validate_date_range(today, today - timedelta(days=1))
-        assert "must be <=" in str(exc_info.value)
+    def test_future_allowed(self, client):
+        client._validate_date_range(date(2024, 1, 1), date(2100, 1, 1), allow_future=True)
 
-    def test_invalid_date_range_future(self):
-        client = OpenMeteoClient()
-        with pytest.raises(OpenMeteoValidationError) as exc_info:
-            client._validate_date_range(date.today(), date.today() + timedelta(days=10))
-        assert "cannot be in the future" in str(exc_info.value)
+    @pytest.mark.parametrize("days", [1, 7, 16])
+    def test_valid_forecast_days(self, client, days):
+        client._validate_forecast_days(days)
 
-    def test_date_range_with_allow_future(self):
-        client = OpenMeteoClient()
-        today = date.today()
-        client._validate_date_range(
-            today, today + timedelta(days=10), allow_future=True
-        )
-
-    def test_valid_forecast_days(self):
-        client = OpenMeteoClient()
-        for days in [1, 5, 16]:
+    @pytest.mark.parametrize("days", [0, 17, -1])
+    def test_invalid_forecast_days(self, client, days):
+        with pytest.raises(OpenMeteoValidationError):
             client._validate_forecast_days(days)
 
-    def test_invalid_forecast_days_over_max(self):
-        client = OpenMeteoClient()
-        with pytest.raises(OpenMeteoValidationError) as exc_info:
-            client._validate_forecast_days(17)
-        assert "days must be in range [1, 16]" in str(exc_info.value)
-
-    def test_invalid_forecast_days_zero(self):
-        client = OpenMeteoClient()
+    def test_constructor_argument_validation(self):
         with pytest.raises(OpenMeteoValidationError):
-            client._validate_forecast_days(0)
+            OpenMeteoClient(retries=-1)
+        with pytest.raises(OpenMeteoValidationError):
+            OpenMeteoClient(max_concurrency=0)
+        with pytest.raises(OpenMeteoValidationError):
+            OpenMeteoClient(ttl_minutes=0)
 
+    def test_legacy_constructor_arguments_accepted(self, tmp_path):
+        OpenMeteoClient(ttl_minutes=30, cache_dir=tmp_path, timeout=60.0)
+        OpenMeteoClient()
 
-class TestTrimToRange:
-    def test_trim_daily_data(self):
-        client = OpenMeteoClient()
-        data = {
-            "daily": {
-                "time": [
-                    "2024-01-01",
-                    "2024-01-02",
-                    "2024-01-03",
-                    "2024-01-04",
-                    "2024-01-05",
-                ],
-                "temperature_2m_max": [1.0, 2.0, 3.0, 4.0, 5.0],
-                "temperature_2m_min": [0.0, 1.0, 2.0, 3.0, 4.0],
-            }
-        }
 
-        trimmed = client._trim_to_range(
-            data, date(2024, 1, 2), date(2024, 1, 4), TimeStep.DAILY
-        )
-
-        assert len(trimmed["daily"]["time"]) == 3
-        assert trimmed["daily"]["time"] == ["2024-01-02", "2024-01-03", "2024-01-04"]
-        assert trimmed["daily"]["temperature_2m_max"] == [2.0, 3.0, 4.0]
-
-    def test_trim_hourly_data(self):
-        client = OpenMeteoClient()
-        data = {
-            "hourly": {
-                "time": [
-                    "2024-01-01T00:00",
-                    "2024-01-01T01:00",
-                    "2024-01-01T02:00",
-                    "2024-01-01T03:00",
-                ],
-                "temperature_2m": [1.0, 2.0, 3.0, 4.0],
-            }
-        }
-
-        trimmed = client._trim_to_range(
-            data, date(2024, 1, 1), date(2024, 1, 1), TimeStep.HOURLY
-        )
-
-        assert len(trimmed["hourly"]["time"]) == 4
-
-    def test_trim_empty_data(self):
-        client = OpenMeteoClient()
-        data = {"daily": {"time": []}}
-        trimmed = client._trim_to_range(
-            data, date(2024, 1, 1), date(2024, 1, 5), TimeStep.DAILY
-        )
-        assert trimmed == data
-
-    def test_trim_no_matching_data(self):
-        client = OpenMeteoClient()
-        data = {
-            "hourly": {
-                "time": ["2024-01-01T00:00"],
-                "temperature_2m": [1.0],
-            }
-        }
-        trimmed = client._trim_to_range(
-            data, date(2024, 1, 5), date(2024, 1, 10), TimeStep.HOURLY
-        )
-        assert len(trimmed["hourly"]["time"]) == 1
-
-
-class TestMergeData:
-    def test_merge_empty_existing(self):
-        client = OpenMeteoClient()
-        new = {"daily": {"time": ["2024-01-01"], "temperature_2m_max": [5.0]}}
-
-        merged = client._merge_data(None, new, TimeStep.DAILY)
-
-        assert merged == new
-
-    def test_merge_non_overlapping_data(self):
-        client = OpenMeteoClient()
-        existing = {"daily": {"time": ["2024-01-01"], "temperature_2m_max": [5.0]}}
-        new = {"daily": {"time": ["2024-01-02"], "temperature_2m_max": [6.0]}}
-
-        merged = client._merge_data(existing, new, TimeStep.DAILY)
-
-        assert len(merged["daily"]["time"]) == 2
-        assert merged["daily"]["time"] == ["2024-01-01", "2024-01-02"]
-        assert merged["daily"]["temperature_2m_max"] == [5.0, 6.0]
-
-    def test_merge_adds_new_variable(self):
-        client = OpenMeteoClient()
-        existing = {"hourly": {"time": ["2024-01-01T00:00"], "temperature_2m": [5.0]}}
-        new = {
-            "hourly": {
-                "time": ["2024-01-01T01:00"],
-                "temperature_2m": [6.0],
-                "humidity": [80.0],
-            }
-        }
-
-        merged = client._merge_data(existing, new, TimeStep.HOURLY)
-
-        assert len(merged["hourly"]["time"]) == 2
-        assert merged["hourly"]["humidity"] == [80.0]
-
-
-class TestCacheKey:
-    def test_coord_key_format(self):
-        key = _coord_key(55.782298, 37.327136)
-        assert "55" in key
-        assert "37" in key
-
-    def test_coord_key_negative(self):
-        key = _coord_key(-33.865, 151.21)
-        assert "m33" in key
-
-    def test_month_key_format(self):
-        key = _month_key(date(2024, 1, 15))
-        assert key == "2024-01"
-
-    def test_parse_date_date_only(self):
-        result = _parse_date("2024-01-15")
-        assert result == date(2024, 1, 15)
-
-    def test_parse_date_datetime(self):
-        result = _parse_date("2024-01-15T12:00")
-        assert result == date(2024, 1, 15)
-
-
-class TestHistoricalCache:
-    def test_init_creates_directory(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cache_dir = Path(tmpdir) / "cache"
-            cache = HistoricalCache(cache_dir)
-            assert cache_dir.exists()
-
-    def test_save_and_load_month(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cache = HistoricalCache(Path(tmpdir))
-            data = {"hourly": {"time": ["2024-01-01T00:00"], "temperature_2m": [5.0]}}
-
-            cache.save_month(55.75, 37.62, TimeStep.HOURLY, "2024-01", data)
-            loaded = cache.load_month(55.75, 37.62, TimeStep.HOURLY, "2024-01")
-
-            assert loaded == data
-
-    def test_load_nonexistent_month(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cache = HistoricalCache(Path(tmpdir))
-            result = cache.load_month(55.75, 37.62, TimeStep.HOURLY, "2024-01")
-            assert result is None
-
-    def test_get_cached_months(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cache = HistoricalCache(Path(tmpdir))
-            cache.save_month(55.75, 37.62, TimeStep.HOURLY, "2024-01", {"test": 1})
-            cache.save_month(55.75, 37.62, TimeStep.HOURLY, "2024-02", {"test": 2})
-
-            months = cache.get_cached_months(55.75, 37.62, TimeStep.HOURLY)
-
-            assert "2024-01" in months
-            assert "2024-02" in months
-
-    def test_is_month_recent(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cache = HistoricalCache(Path(tmpdir))
-
-            today = date.today()
-            current_month = _month_key(today)
-            old_month = f"{today.year - 2}-01"
-
-            assert cache.is_month_recent(current_month) is True
-            assert cache.is_month_recent(old_month) is False
-
-    def test_get_missing_months(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cache = HistoricalCache(Path(tmpdir))
-
-            start = date(2024, 1, 1)
-            end = date(2024, 3, 31)
-            missing = cache.get_missing_months(
-                55.75, 37.62, TimeStep.HOURLY, start, end
-            )
-
-            assert "2024-01" in missing
-            assert "2024-02" in missing
-            assert "2024-03" in missing
-
-    def test_get_missing_months_with_cached(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cache = HistoricalCache(Path(tmpdir))
-            cache.save_month(55.75, 37.62, TimeStep.HOURLY, "2024-01", {"test": 1})
-
-            start = date(2024, 1, 1)
-            end = date(2024, 2, 29)
-            missing = cache.get_missing_months(
-                55.75, 37.62, TimeStep.HOURLY, start, end
-            )
-
-            assert "2024-01" not in missing
-            assert "2024-02" in missing
-
-
-class TestForecastCache:
-    def test_set_and_get(self):
-        cache = ForecastCache()
-
-        response = MagicMock()
-        response.hourly.time = ["2024-01-01T00:00", "2024-01-01T01:00"]
-        response.model_dump.return_value = {"hourly": {"time": ["2024-01-01T00:00"]}}
-
-        cache.set(55.75, 37.62, TimeStep.HOURLY, response)
-        result = cache.get(55.75, 37.62, TimeStep.HOURLY)
-
-        assert result is not None
-        assert "hourly" in result
-
-    def test_is_valid_nonexistent(self):
-        cache = ForecastCache()
-        assert cache.is_valid(55.75, 37.62, TimeStep.HOURLY) is False
-
-    def test_is_valid_returns_true(self):
-        cache = ForecastCache(ttl_minutes=60)
-
-        response = MagicMock()
-        response.hourly.time = ["2030-01-01T00:00"]
-        response.model_dump.return_value = {"hourly": {"time": ["2030-01-01T00:00"]}}
-
-        cache.set(55.75, 37.62, TimeStep.HOURLY, response)
-        assert cache.get(55.75, 37.62, TimeStep.HOURLY) is not None
-
-    def test_clear(self):
-        cache = ForecastCache()
-
-        response = MagicMock()
-        response.hourly.time = ["2030-01-01T00:00"]
-        response.model_dump.return_value = {"hourly": {"time": ["2030-01-01T00:00"]}}
-
-        cache.set(55.75, 37.62, TimeStep.HOURLY, response)
-        cache.clear()
-
-        assert cache.get(55.75, 37.62, TimeStep.HOURLY) is None
-
-    def test_get_last_time_hourly(self):
-        cache = ForecastCache()
-
-        response = HourlyResponse(
-            latitude=55.75,
-            longitude=37.62,
-            elevation=130.0,
-            generationtime_ms=0.5,
-            utc_offset_seconds=10800,
-            timezone="Europe/Moscow",
-            timezone_abbreviation="MSK",
-            hourly_units=HourlyUnits(),
-            hourly=HourlyData(time=["2024-01-01T12:00"]),
-        )
-
-        result = cache._get_last_time(response)
-        assert result is not None
-
-    def test_get_last_time_daily(self):
-        cache = ForecastCache()
-
-        response = DailyResponse(
-            latitude=55.75,
-            longitude=37.62,
-            elevation=130.0,
-            generationtime_ms=0.5,
-            utc_offset_seconds=10800,
-            timezone="Europe/Moscow",
-            timezone_abbreviation="MSK",
-            daily_units=DailyUnits(),
-            daily=DailyData(time=["2024-01-01"]),
-        )
-
-        result = cache._get_last_time(response)
-        assert result is not None
-
-    def test_get_last_time_empty(self):
-        cache = ForecastCache()
-
-        response = HourlyResponse(
-            latitude=55.75,
-            longitude=37.62,
-            elevation=130.0,
-            generationtime_ms=0.5,
-            utc_offset_seconds=10800,
-            timezone="Europe/Moscow",
-            timezone_abbreviation="MSK",
-            hourly_units=HourlyUnits(),
-            hourly=HourlyData(time=[]),
-        )
-
-        result = cache._get_last_time(response)
-        assert result is not None
-
-    def test_get_last_time_no_hourly_or_daily(self):
-        cache = ForecastCache()
-
-        response = MagicMock()
-        del response.hourly
-        del response.daily
-
-        result = cache._get_last_time(response)
-        assert result is not None
-
-
-class TestExceptions:
-    def test_api_error(self):
-        error = OpenMeteoAPIError("Invalid parameter")
-        assert error.reason == "Invalid parameter"
-        assert "Invalid parameter" in str(error)
-
-    def test_validation_error(self):
-        error = OpenMeteoValidationError("Invalid value")
-        assert "Invalid value" in str(error)
-
-    def test_connection_error(self):
-        error = OpenMeteoConnectionError("Network error")
-        assert "Network error" in str(error)
-
-
-class TestClientLifecycle:
-    @pytest.mark.asyncio
+class TestLifecycle:
     async def test_context_manager(self):
-        async with OpenMeteoClient() as client:
-            assert client._client is not None
+        async with OpenMeteoClient(cache=MemoryBackend()) as c:
+            assert c._client is not None
+        assert c._client is None
 
-    @pytest.mark.asyncio
-    async def test_close_idempotent(self):
-        client = OpenMeteoClient()
+    async def test_close_idempotent(self, client):
+        await client._ensure_client()
         await client.close()
         await client.close()
 
-    @pytest.mark.asyncio
-    async def test_ensure_client_creates_once(self):
-        client = OpenMeteoClient()
-        c1 = await client._ensure_client()
-        c2 = await client._ensure_client()
-        assert c1 is c2
+    async def test_ensure_client_creates_once(self, client):
+        a = await client._ensure_client()
+        b = await client._ensure_client()
+        assert a is b
         await client.close()
 
-
-class TestCacheManagement:
-    def test_clear_forecast_cache(self):
-        client = OpenMeteoClient()
-        client._forecast_cache.set(
-            55.75,
-            37.62,
-            TimeStep.HOURLY,
-            MagicMock(
-                hourly=MagicMock(time=["2030-01-01T00:00"]), model_dump=lambda: {}
-            ),
-        )
-        client.clear_forecast_cache()
-        assert client._forecast_cache.get(55.75, 37.62, TimeStep.HOURLY) is None
-
-    def test_clear_historical_cache(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            client = OpenMeteoClient(cache_dir=Path(tmpdir))
-            client._historical_cache.save_month(
-                55.75, 37.62, TimeStep.HOURLY, "2024-01", {"test": 1}
-            )
-
-            client.clear_historical_cache()
-
-            result = client._historical_cache.load_month(
-                55.75, 37.62, TimeStep.HOURLY, "2024-01"
-            )
-            assert result is None
-
-    def test_clear_all_cache(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            client = OpenMeteoClient(cache_dir=Path(tmpdir))
-            client._historical_cache.save_month(
-                55.75, 37.62, TimeStep.HOURLY, "2024-01", {"test": 1}
-            )
-
-            client.clear_all_cache()
-
-            assert client._forecast_cache.get(55.75, 37.62, TimeStep.HOURLY) is None
-
-
-class TestFetchMethod:
-    @pytest.mark.asyncio
-    async def test_fetch_success(self):
-        client = OpenMeteoClient()
-
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "latitude": 55.75,
-            "longitude": 37.62,
-            "hourly": {"time": ["2024-01-01T00:00"], "temperature_2m": [5.0]},
-        }
-        mock_response.raise_for_status = MagicMock()
-
-        with patch.object(client, "_ensure_client") as mock_ensure:
-            mock_http_client = AsyncMock()
-            mock_http_client.get = AsyncMock(return_value=mock_response)
-            mock_ensure.return_value = mock_http_client
-
-            result = await client._fetch("https://example.com", {"param": "value"})
-
-            assert "hourly" in result
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_fetch_api_error(self):
-        client = OpenMeteoClient()
-
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"error": True, "reason": "Invalid parameter"}
-        mock_response.raise_for_status = MagicMock()
-
-        with patch.object(client, "_ensure_client") as mock_ensure:
-            mock_http_client = AsyncMock()
-            mock_http_client.get = AsyncMock(return_value=mock_response)
-            mock_ensure.return_value = mock_http_client
-
-            with pytest.raises(OpenMeteoAPIError) as exc_info:
-                await client._fetch("https://example.com", {})
-            assert "Invalid parameter" in str(exc_info.value)
-
-        await client.close()
+    def test_constructor_has_no_side_effects(self, tmp_path):
+        target = tmp_path / "never-created"
+        OpenMeteoClient(cache_dir=target)
+        assert not target.exists()
 
 
 class TestGetForecast:
-    @pytest.mark.asyncio
-    async def test_get_forecast_returns_hourly(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            client = OpenMeteoClient(cache_dir=Path(tmpdir))
+    async def test_returns_hourly(self, client):
+        with patch.object(client, "_fetch", AsyncMock(return_value=hourly_response(["2030-01-01T00:00"], temperature_2m=[5.0]))):
+            result = await client.get_forecast(55.75, 37.62, days=7, step=TimeStep.HOURLY)
+        assert isinstance(result, HourlyResponse)
+        assert result.hourly.temperature_2m == [5.0]
+        await client.close()
 
-            mock_response = {
-                "latitude": 55.75,
-                "longitude": 37.62,
-                "elevation": 130.0,
-                "generationtime_ms": 0.5,
-                "utc_offset_seconds": 10800,
-                "timezone": "Europe/Moscow",
-                "timezone_abbreviation": "MSK",
-                "hourly_units": {"time": "iso8601"},
-                "hourly": {"time": ["2024-01-01T00:00"], "temperature_2m": [5.0]},
-            }
+    async def test_returns_daily(self, client):
+        with patch.object(client, "_fetch", AsyncMock(return_value=daily_response(["2030-01-01"], temperature_2m_max=[5.0]))):
+            result = await client.get_forecast(55.75, 37.62, days=7, step=TimeStep.DAILY)
+        assert isinstance(result, DailyResponse)
+        await client.close()
 
-            with patch.object(client, "_fetch", AsyncMock(return_value=mock_response)):
-                result = await client.get_forecast(
-                    55.75, 37.62, days=7, step=TimeStep.HOURLY
-                )
+    async def test_uses_cache(self, client):
+        fetch = AsyncMock(return_value=hourly_response(["2030-01-01T00:00"], temperature_2m=[5.0]))
+        with patch.object(client, "_fetch", fetch):
+            await client.get_forecast(55.75, 37.62, days=7)
+            await client.get_forecast(55.75, 37.62, days=7)
+        assert fetch.await_count == 1
+        await client.close()
 
-                assert isinstance(result, HourlyResponse)
+    async def test_force_refresh_bypasses_cache(self, client):
+        fetch = AsyncMock(return_value=hourly_response(["2030-01-01T00:00"], temperature_2m=[5.0]))
+        with patch.object(client, "_fetch", fetch):
+            await client.get_forecast(55.75, 37.62, days=7)
+            await client.get_forecast(55.75, 37.62, days=7, force_refresh=True)
+        assert fetch.await_count == 2
+        await client.close()
 
-            await client.close()
+    async def test_days_and_timezone_part_of_key(self, client):
+        fetch = AsyncMock(return_value=hourly_response(["2030-01-01T00:00"], temperature_2m=[5.0]))
+        with patch.object(client, "_fetch", fetch):
+            await client.get_forecast(55.75, 37.62, days=3)
+            await client.get_forecast(55.75, 37.62, days=7)
+            await client.get_forecast(55.75, 37.62, days=7, timezone="Europe/Moscow")
+        assert fetch.await_count == 3
+        await client.close()
 
-    @pytest.mark.asyncio
-    async def test_get_forecast_returns_daily(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            client = OpenMeteoClient(cache_dir=Path(tmpdir))
+    async def test_requested_variables_aligned(self, client):
+        payload = hourly_response(["2030-01-01T00:00", "2030-01-01T01:00"], temperature_2m=[1.0, 2.0])
+        with patch.object(client, "_fetch", AsyncMock(return_value=payload)):
+            result = await client.get_forecast(55.75, 37.62, variables=["temperature_2m", "visibility"])
+        assert result.hourly.visibility == [None, None]
+        assert result.hourly.rain is None
+        await client.close()
 
-            mock_response = {
-                "latitude": 55.75,
-                "longitude": 37.62,
-                "elevation": 130.0,
-                "generationtime_ms": 0.5,
-                "utc_offset_seconds": 10800,
-                "timezone": "Europe/Moscow",
-                "timezone_abbreviation": "MSK",
-                "daily_units": {"time": "iso8601"},
-                "daily": {"time": ["2024-01-01"], "temperature_2m_max": [5.0]},
-            }
+    async def test_cached_response_also_aligned(self, client):
+        payload = hourly_response(["2030-01-01T00:00"], temperature_2m=[1.0])
+        with patch.object(client, "_fetch", AsyncMock(return_value=payload)):
+            await client.get_forecast(55.75, 37.62, variables=["temperature_2m", "visibility"])
+            result = await client.get_forecast(55.75, 37.62, variables=["temperature_2m", "visibility"])
+        assert result.hourly.visibility == [None]
+        await client.close()
 
-            with patch.object(client, "_fetch", AsyncMock(return_value=mock_response)):
-                result = await client.get_forecast(
-                    55.75, 37.62, days=7, step=TimeStep.DAILY
-                )
-
-                assert isinstance(result, DailyResponse)
-
-            await client.close()
-
-    @pytest.mark.asyncio
-    async def test_get_forecast_uses_cache(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            client = OpenMeteoClient(cache_dir=Path(tmpdir))
-
-            mock_response = {
-                "latitude": 55.75,
-                "longitude": 37.62,
-                "elevation": 130.0,
-                "generationtime_ms": 0.5,
-                "utc_offset_seconds": 10800,
-                "timezone": "Europe/Moscow",
-                "timezone_abbreviation": "MSK",
-                "hourly_units": {"time": "iso8601"},
-                "hourly": {"time": ["2030-01-01T00:00"], "temperature_2m": [5.0]},
-            }
-
-            mock_fetch = AsyncMock(return_value=mock_response)
-            with patch.object(client, "_fetch", mock_fetch):
-                await client.get_forecast(55.75, 37.62, days=7, step=TimeStep.HOURLY)
-                mock_fetch.assert_called_once()
-
-                mock_fetch.reset_mock()
-                await client.get_forecast(55.75, 37.62, days=7, step=TimeStep.HOURLY)
-                mock_fetch.assert_not_called()
-
-            await client.close()
+    async def test_shared_backend_between_clients(self):
+        backend = MemoryBackend()
+        a, b = OpenMeteoClient(cache=backend), OpenMeteoClient(cache=backend)
+        payload = hourly_response(["2030-01-01T00:00"], temperature_2m=[5.0])
+        with patch.object(a, "_fetch", AsyncMock(return_value=payload)):
+            await a.get_forecast(55.75, 37.62)
+        with patch.object(b, "_fetch", AsyncMock(side_effect=AssertionError("should not fetch"))):
+            result = await b.get_forecast(55.75, 37.62)
+        assert result.hourly.temperature_2m == [5.0]
 
 
 class TestGetCurrent:
-    @pytest.mark.asyncio
-    async def test_get_current_returns_response(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            client = OpenMeteoClient(cache_dir=Path(tmpdir))
-
-            mock_response = {
-                "latitude": 55.75,
-                "longitude": 37.62,
-                "elevation": 130.0,
-                "generationtime_ms": 0.5,
-                "utc_offset_seconds": 10800,
-                "timezone": "Europe/Moscow",
-                "timezone_abbreviation": "MSK",
-                "current_units": {"time": "iso8601", "interval": "seconds"},
-                "current": {
-                    "time": "2024-01-01T12:00",
-                    "interval": 3600,
-                    "temperature_2m": -5.0,
-                },
-            }
-
-            with patch.object(client, "_fetch", AsyncMock(return_value=mock_response)):
-                result = await client.get_current(55.75, 37.62)
-
-                assert isinstance(result, CurrentResponse)
-                assert result.current.temperature_2m == -5.0
-
-            await client.close()
+    async def test_returns_response(self, client):
+        payload = {
+            **META,
+            "current_units": {"time": "iso8601", "interval": "seconds"},
+            "current": {"time": "2024-01-01T12:00", "interval": 3600, "temperature_2m": -5.0},
+        }
+        with patch.object(client, "_fetch", AsyncMock(return_value=payload)) as fetch:
+            result = await client.get_current(55.75, 37.62)
+            await client.get_current(55.75, 37.62)
+        assert isinstance(result, CurrentResponse)
+        assert result.current.temperature_2m == -5.0
+        assert fetch.await_count == 2  # never cached
+        await client.close()
 
 
 class TestGetHistorical:
-    @pytest.mark.asyncio
-    async def test_get_historical_returns_hourly(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            client = OpenMeteoClient(cache_dir=Path(tmpdir))
+    async def test_single_month_hourly(self, client):
+        with patch.object(client, "_fetch", archive_stub()):
+            result = await client.get_historical(
+                55.75, 37.62, date(2024, 1, 1), date(2024, 1, 2), step=TimeStep.HOURLY, variables=["temperature_2m"]
+            )
+        assert isinstance(result, HourlyResponse)
+        assert len(result.hourly.time) == 48  # trimmed to the two requested days
+        assert len(result.hourly.temperature_2m) == 48
 
-            mock_response = {
+    async def test_daily(self, client):
+        async def fetch(url, params):
+            start, end = date.fromisoformat(params["start_date"]), date.fromisoformat(params["end_date"])
+            times = [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
+            return daily_response(times, temperature_2m_max=[1.0] * len(times))
+
+        with patch.object(client, "_fetch", fetch):
+            result = await client.get_historical(
+                55.75, 37.62, date(2024, 1, 10), date(2024, 1, 12), step=TimeStep.DAILY, variables=["temperature_2m_max"]
+            )
+        assert isinstance(result, DailyResponse)
+        assert result.daily.time == ["2024-01-10", "2024-01-11", "2024-01-12"]
+
+    async def test_no_trim_returns_whole_months(self, client):
+        with patch.object(client, "_fetch", archive_stub()):
+            result = await client.get_historical(
+                55.75, 37.62, date(2024, 1, 10), date(2024, 1, 12), variables=["temperature_2m"], trim_to_range=False
+            )
+        assert len(result.hourly.time) == 31 * 24
+
+    async def test_december_request_asks_for_december_only(self, client):
+        calls = []
+        with patch.object(client, "_fetch", archive_stub(record=calls)):
+            await client.get_historical(55.75, 37.62, date(2025, 12, 1), date(2025, 12, 31), variables=["temperature_2m"])
+        assert calls == [
+            {
                 "latitude": 55.75,
                 "longitude": 37.62,
-                "elevation": 130.0,
-                "generationtime_ms": 0.5,
-                "utc_offset_seconds": 10800,
-                "timezone": "Europe/Moscow",
-                "timezone_abbreviation": "MSK",
-                "hourly_units": {"time": "iso8601"},
-                "hourly": {"time": ["2024-01-01T00:00"], "temperature_2m": [5.0]},
+                "start_date": "2025-12-01",
+                "end_date": "2025-12-31",
+                "timezone": "auto",
+                "hourly": "temperature_2m",
             }
+        ]
 
-            with patch.object(client, "_fetch", AsyncMock(return_value=mock_response)):
-                result = await client.get_historical(
-                    55.75,
-                    37.62,
-                    date(2024, 1, 1),
-                    date(2024, 1, 1),
-                    step=TimeStep.HOURLY,
-                )
+    async def test_cached_and_fetched_months_in_chronological_order(self, client):
+        calls = []
+        stub = archive_stub(record=calls)
+        with patch.object(client, "_fetch", stub):
+            await client.get_historical(55.75, 37.62, date(2024, 1, 1), date(2024, 2, 29), variables=["temperature_2m"])
+            calls.clear()
+            result = await client.get_historical(
+                55.75, 37.62, date(2024, 1, 1), date(2024, 3, 31), variables=["temperature_2m"]
+            )
+        assert [c["start_date"] for c in calls] == ["2024-03-01"]  # only March fetched
+        times = result.hourly.time
+        assert times[0] == "2024-01-01T00:00" and times[-1] == "2024-03-31T23:00"
+        assert times == sorted(times)
+        assert len(times) == (31 + 29 + 31) * 24
 
-                assert isinstance(result, HourlyResponse)
+    async def test_second_call_served_from_cache(self, client):
+        fetch = AsyncMock(side_effect=archive_stub())
+        with patch.object(client, "_fetch", fetch):
+            await client.get_historical(55.75, 37.62, date(2024, 1, 1), date(2024, 1, 31), variables=["temperature_2m"])
+            await client.get_historical(55.75, 37.62, date(2024, 1, 1), date(2024, 1, 31), variables=["temperature_2m"])
+        assert fetch.await_count == 1
 
-            await client.close()
+    async def test_missing_variables_trigger_refetch(self, client):
+        fetch = AsyncMock(side_effect=archive_stub())
+        with patch.object(client, "_fetch", fetch):
+            await client.get_historical(55.75, 37.62, date(2024, 1, 1), date(2024, 1, 31), variables=["temperature_2m"])
+            await client.get_historical(
+                55.75, 37.62, date(2024, 1, 1), date(2024, 1, 31), variables=["temperature_2m", "rain"]
+            )
+        assert fetch.await_count == 2
 
-    @pytest.mark.asyncio
-    async def test_get_historical_returns_daily(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            client = OpenMeteoClient(cache_dir=Path(tmpdir))
+    async def test_timezone_is_part_of_cache_key(self, client):
+        fetch = AsyncMock(side_effect=archive_stub())
+        with patch.object(client, "_fetch", fetch):
+            await client.get_historical(55.75, 37.62, date(2024, 1, 1), date(2024, 1, 31), variables=["temperature_2m"])
+            await client.get_historical(
+                55.75, 37.62, date(2024, 1, 1), date(2024, 1, 31), variables=["temperature_2m"], timezone="Europe/Moscow"
+            )
+        assert fetch.await_count == 2
 
-            mock_response = {
-                "latitude": 55.75,
-                "longitude": 37.62,
-                "elevation": 130.0,
-                "generationtime_ms": 0.5,
-                "utc_offset_seconds": 10800,
-                "timezone": "Europe/Moscow",
-                "timezone_abbreviation": "MSK",
-                "daily_units": {"time": "iso8601"},
-                "daily": {"time": ["2024-01-01"], "temperature_2m_max": [5.0]},
-            }
+    async def test_months_with_different_variable_sets_are_aligned(self):
+        backend = MemoryBackend()
+        client = OpenMeteoClient(cache=backend)
+        # January is cached by a "narrow" request first: only temperature.
+        with patch.object(client, "_fetch", archive_stub()):
+            await client.get_historical(55.75, 37.62, date(2024, 1, 1), date(2024, 1, 31), variables=["temperature_2m"])
+        # Then a wide request: January lacks rain -> re-fetched; simulate the API
+        # not returning rain for January at all (variable unavailable that month).
+        with patch.object(client, "_fetch", archive_stub(variables_per_month={"2024-01": ["temperature_2m"]})):
+            result = await client.get_historical(
+                55.75, 37.62, date(2024, 1, 1), date(2024, 2, 29), variables=["temperature_2m", "rain"]
+            )
+        n = (31 + 29) * 24
+        assert len(result.hourly.time) == n
+        assert len(result.hourly.temperature_2m) == n
+        assert len(result.hourly.rain) == n
+        assert result.hourly.rain[: 31 * 24] == [None] * (31 * 24)
+        assert result.hourly.rain[31 * 24] == 0.0
 
-            with patch.object(client, "_fetch", AsyncMock(return_value=mock_response)):
-                result = await client.get_historical(
-                    55.75,
-                    37.62,
-                    date(2024, 1, 1),
-                    date(2024, 1, 1),
-                    step=TimeStep.DAILY,
-                )
+    async def test_concurrency_bounded(self):
+        client = OpenMeteoClient(cache=MemoryBackend(), max_concurrency=2)
+        active, peak = 0, 0
 
-                assert isinstance(result, DailyResponse)
+        async def fetch(url, params):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return await archive_stub()(url, params)
 
-            await client.close()
+        with patch.object(client, "_fetch", fetch):
+            await client.get_historical(55.75, 37.62, date(2023, 1, 1), date(2023, 12, 31), variables=["temperature_2m"])
+        assert peak == 2
 
-    @pytest.mark.asyncio
-    async def test_get_historical_empty_response(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            client = OpenMeteoClient(cache_dir=Path(tmpdir))
+    async def test_error_in_one_month_fails_whole_request(self, client):
+        async def fetch(url, params):
+            if params["start_date"] == "2024-02-01":
+                raise OpenMeteoConnectionError("boom")
+            return await archive_stub()(url, params)
 
-            with patch.object(
-                client, "_fetch", AsyncMock(side_effect=Exception("No data"))
-            ):
-                with patch.object(
-                    client._historical_cache,
-                    "get_missing_months",
-                    return_value=[],
-                ):
-                    with patch.object(
-                        client._historical_cache,
-                        "get_cached_months",
-                        return_value=set(),
-                    ):
-                        result = await client.get_historical(
-                            55.75,
-                            37.62,
-                            date(2024, 1, 1),
-                            date(2024, 1, 1),
-                            step=TimeStep.HOURLY,
-                        )
+        with patch.object(client, "_fetch", fetch):
+            with pytest.raises(OpenMeteoConnectionError):
+                await client.get_historical(55.75, 37.62, date(2024, 1, 1), date(2024, 3, 31), variables=["temperature_2m"])
 
-                        assert isinstance(result, HourlyResponse)
-                        assert len(result.hourly.time) == 0
+    async def test_api_error_propagates(self, client):
+        with patch.object(client, "_fetch", AsyncMock(side_effect=OpenMeteoAPIError("bad"))):
+            with pytest.raises(OpenMeteoAPIError):
+                await client.get_historical(55.75, 37.62, date(2024, 1, 1), date(2024, 1, 2), variables=["temperature_2m"])
 
-            await client.close()
+    async def test_corrupt_cache_entry_is_refetched(self):
+        backend = MemoryBackend()
+        client = OpenMeteoClient(cache=backend)
+        fetch = AsyncMock(side_effect=archive_stub())
+        with patch.object(client, "_fetch", fetch):
+            await client.get_historical(55.75, 37.62, date(2024, 1, 1), date(2024, 1, 31), variables=["temperature_2m"])
+            key = HistoryKey(55.75, 37.62, TimeStep.HOURLY, "auto", "2024-01").as_str()
+            await backend.set(key, b"garbage", None)
+            result = await client.get_historical(
+                55.75, 37.62, date(2024, 1, 1), date(2024, 1, 31), variables=["temperature_2m"]
+            )
+        assert fetch.await_count == 2
+        assert len(result.hourly.time) == 31 * 24
+
+    async def test_requested_variable_absent_everywhere_is_none_list(self, client):
+        with patch.object(client, "_fetch", archive_stub(variables_per_month={"2024-01": []})):
+            result = await client.get_historical(
+                55.75, 37.62, date(2024, 1, 1), date(2024, 1, 1), variables=["temperature_2m"]
+            )
+        assert result.hourly.temperature_2m == [None] * 24
+        assert result.hourly.rain is None
+
+    async def test_data_error_surfaces(self, client):
+        with patch.object(client, "_fetch", archive_stub()), patch(
+            "openmeteo.client.assemble", side_effect=OpenMeteoDataError("mismatch")
+        ):
+            with pytest.raises(OpenMeteoDataError):
+                await client.get_historical(55.75, 37.62, date(2024, 1, 1), date(2024, 1, 1), variables=["temperature_2m"])
+
+
+class TestCacheManagement:
+    async def test_clear_forecast_cache(self, client):
+        with patch.object(client, "_fetch", AsyncMock(return_value=hourly_response(["2030-01-01T00:00"], temperature_2m=[5.0]))) as fetch:
+            await client.get_forecast(55.75, 37.62)
+            assert await client.clear_forecast_cache() == 1
+            await client.get_forecast(55.75, 37.62)
+        assert fetch.await_count == 2
+
+    async def test_clear_historical_cache_keeps_forecasts(self, client):
+        with patch.object(client, "_fetch", archive_stub()):
+            await client.get_historical(55.75, 37.62, date(2024, 1, 1), date(2024, 2, 29), variables=["temperature_2m"])
+        with patch.object(client, "_fetch", AsyncMock(return_value=hourly_response(["2030-01-01T00:00"], temperature_2m=[5.0]))) as fetch:
+            await client.get_forecast(55.75, 37.62)
+            assert await client.clear_historical_cache() == 2
+            await client.get_forecast(55.75, 37.62)
+        assert fetch.await_count == 1
+
+    async def test_clear_all_cache(self, client):
+        with patch.object(client, "_fetch", archive_stub()):
+            await client.get_historical(55.75, 37.62, date(2024, 1, 1), date(2024, 1, 31), variables=["temperature_2m"])
+        with patch.object(client, "_fetch", AsyncMock(return_value=hourly_response(["2030-01-01T00:00"], temperature_2m=[5.0]))):
+            await client.get_forecast(55.75, 37.62)
+        assert await client.clear_all_cache() == 2

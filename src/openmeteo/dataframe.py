@@ -56,10 +56,12 @@ Example:
             print(df)
 """
 
-from datetime import date, datetime
-from typing import Union
+from typing import TYPE_CHECKING, Union
 
 from .models import CurrentResponse, DailyResponse, HourlyResponse
+
+if TYPE_CHECKING:  # pragma: no cover
+    import pandas as pd
 
 
 def _check_pandas() -> None:
@@ -75,11 +77,19 @@ def _check_pandas() -> None:
 
 def to_dataframe(
     response: Union[HourlyResponse, DailyResponse, CurrentResponse],
+    *,
+    include_empty: bool = False,
 ) -> "pd.DataFrame":
     """Convert an OpenMeteo response to a pandas DataFrame.
 
     Automatically detects the response type and extracts the appropriate
     data (hourly, daily, or current). Converts time columns to datetime.
+
+    By default only variables present in the response become columns: a
+    variable that was not requested is ``None`` in the model and is skipped.
+    A variable that was requested but has no values is a list of ``None``
+    and is kept as an all-NaN column, so the frame always has the columns
+    you asked for.
 
     Args:
         response: OpenMeteo response object. Can be:
@@ -88,9 +98,11 @@ def to_dataframe(
             - DailyResponse: from get_historical() or get_forecast() with
               step=TimeStep.DAILY
             - CurrentResponse: from get_current()
+        include_empty: Also emit a column for every model field that is
+            ``None`` (the pre-1.1 behaviour). Defaults to False.
 
     Returns:
-        pandas DataFrame with all weather variables as columns.
+        pandas DataFrame with weather variables as columns.
         The 'time' column is converted to datetime64[ns] dtype.
 
     Raises:
@@ -119,14 +131,16 @@ def to_dataframe(
     _check_pandas()
     import pandas as pd
 
+    exclude_none = not include_empty
+
     if isinstance(response, HourlyResponse):
-        data = response.hourly.model_dump()
+        data = response.hourly.model_dump(exclude_none=exclude_none)
         df = pd.DataFrame(data)
         df["time"] = pd.to_datetime(df["time"])
         return df
 
     if isinstance(response, DailyResponse):
-        data = response.daily.model_dump()
+        data = response.daily.model_dump(exclude_none=exclude_none)
         df = pd.DataFrame(data)
         df["time"] = pd.to_datetime(df["time"])
         if "sunrise" in df.columns:
@@ -136,7 +150,7 @@ def to_dataframe(
         return df
 
     if isinstance(response, CurrentResponse):
-        data = response.current.model_dump()
+        data = response.current.model_dump(exclude_none=exclude_none)
         df = pd.DataFrame([data])
         df["time"] = pd.to_datetime(df["time"])
         return df

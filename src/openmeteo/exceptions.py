@@ -116,3 +116,21 @@ class OpenMeteoCacheError(OpenMeteoError):
     """
 
     pass
+
+
+class OpenMeteoDataError(OpenMeteoError):
+    """Exception raised when assembled data violates an internal invariant.
+
+    Raised instead of returning inconsistent data, e.g. when a variable
+    series does not match the length of the ``time`` axis after merging
+    cached months. Indicates a corrupt cache entry or a bug; the response
+    is never returned in that state.
+
+    Example:
+        >>> try:
+        ...     await client.get_historical(55.75, 37.62, start, end)
+        ... except OpenMeteoDataError as e:
+        ...     print(f"Inconsistent data: {e}")
+    """
+
+    pass

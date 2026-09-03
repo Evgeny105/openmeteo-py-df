@@ -26,6 +26,7 @@ Example:
             )
 """
 
+from datetime import timedelta
 from enum import Enum
 
 
@@ -100,13 +101,48 @@ we don't return stale data for periods that should have fresh forecasts.
 """
 
 HISTORY_RECENT_DAYS = 5
-"""int: Number of recent days considered "fresh" for historical data.
+"""int: Deprecated since 1.1.0 and no longer used.
 
-Historical data for months within this range from today will be
-re-fetched even if cached, since recent historical data may be
-updated/corrected by OpenMeteo.
-
-For example, with a value of 5, data from the current month and
-the previous 5 months will always be re-fetched to get the latest
-corrections.
+Kept for import compatibility. Freshness of cached historical months is
+now governed by the ``final`` flag of a cache entry together with
+``recent_ttl`` / ``historical_ttl`` (see :class:`openmeteo.OpenMeteoClient`).
 """
+
+ARCHIVE_LAG_DAYS = 7
+"""int: Days after a month ends before its archive data is considered final.
+
+The Open-Meteo archive serves the most recent days from preliminary model
+runs and replaces them later. A month cached earlier than this many days
+after its last day is stored with ``final=False`` and re-fetched once
+``recent_ttl`` expires.
+"""
+
+DEFAULT_RECENT_TTL = timedelta(hours=6)
+"""timedelta: How long a non-final cached month is served before re-fetch."""
+
+DEFAULT_MAX_CONCURRENCY = 4
+"""int: Maximum number of concurrent archive requests when filling cache gaps."""
+
+DEFAULT_RETRIES = 3
+"""int: Default number of retries for transient API failures."""
+
+DEFAULT_RETRY_BACKOFF = 1.0
+"""float: Base delay in seconds for exponential retry backoff."""
+
+MAX_RETRY_DELAY = 30.0
+"""float: Upper bound in seconds for a single retry delay."""
+
+CACHE_KEY_PREFIX = "openmeteo:v2"
+"""str: Common prefix of all cache keys.
+
+The ``v2`` component is the cache entry format version. It changes together
+with the entry format so that entries written by an incompatible version
+become invisible instead of being misread.
+"""
+
+CACHE_FORMAT_VERSION = 2
+"""int: Value of the ``format`` field in cache entries."""
+
+DEFAULT_CACHE_URL_ENV = "OPENMETEO_CACHE_URL"
+"""str: Environment variable consulted when no cache backend is configured."""
+

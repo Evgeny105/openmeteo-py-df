@@ -33,7 +33,6 @@ Example:
             print(f"{day}: {low}°C - {high}°C")
 """
 
-from datetime import date, datetime
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict
@@ -105,7 +104,10 @@ class HourlyData(BaseModel):
     """Container for hourly weather measurements.
 
     Each field is a list where indices correspond to the time list.
-    All fields except time are optional and depend on requested variables.
+    A variable that was requested is always a list of ``len(time)`` values
+    (individual values may be ``None``); a variable that was not requested
+    is ``None``. Do not ``zip()`` fields without checking for ``None`` first,
+    or use :func:`openmeteo.dataframe.to_dataframe`.
 
     Attributes:
         time: List of ISO8601 datetime strings (e.g., "2024-01-15T00:00").
@@ -175,7 +177,9 @@ class DailyData(BaseModel):
 
     Each field is a list where indices correspond to the time list.
     Daily values are aggregates (max, min, sum, mean) computed from
-    hourly data by OpenMeteo.
+    hourly data by OpenMeteo. A requested variable is always a list of
+    ``len(time)`` values (individual values may be ``None``); a variable
+    that was not requested is ``None``.
 
     Attributes:
         time: List of ISO8601 date strings (e.g., "2024-01-15").
@@ -221,8 +225,8 @@ class DailyData(BaseModel):
     snowfall_sum: Optional[list[Optional[float]]] = None
     precipitation_hours: Optional[list[Optional[float]]] = None
     weather_code: Optional[list[Optional[int]]] = None
-    sunrise: Optional[list[str]] = None
-    sunset: Optional[list[str]] = None
+    sunrise: Optional[list[Optional[str]]] = None
+    sunset: Optional[list[Optional[str]]] = None
     daylight_duration: Optional[list[Optional[float]]] = None
     sunshine_duration: Optional[list[Optional[float]]] = None
     wind_speed_10m_max: Optional[list[Optional[float]]] = None

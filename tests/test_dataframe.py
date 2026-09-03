@@ -1,6 +1,4 @@
 import pytest
-from datetime import date
-from unittest.mock import MagicMock
 
 from openmeteo.models import (
     HourlyResponse,
@@ -189,3 +187,69 @@ class TestToDataframeErrors:
                 sys.modules["pandas"] = original_pandas
             else:
                 del sys.modules["pandas"]
+
+
+def _daily(**series):
+    return DailyResponse(
+        latitude=55.75,
+        longitude=37.62,
+        elevation=130.0,
+        generationtime_ms=0.5,
+        utc_offset_seconds=10800,
+        timezone="Europe/Moscow",
+        timezone_abbreviation="MSK",
+        daily_units=DailyUnits(),
+        daily=DailyData(time=["2024-01-01", "2024-01-02"], **series),
+    )
+
+
+class TestEmptyColumns:
+    def test_unrequested_columns_excluded_by_default(self):
+        pytest.importorskip("pandas")
+        from openmeteo.dataframe import to_dataframe
+
+        df = to_dataframe(
+            _daily(temperature_2m_max=[1.0, 2.0], temperature_2m_min=[0.0, 1.0], precipitation_sum=[0.0, 0.5])
+        )
+        assert list(df.columns) == ["time", "temperature_2m_max", "temperature_2m_min", "precipitation_sum"]
+
+    def test_requested_but_empty_column_kept(self):
+        pytest.importorskip("pandas")
+        from openmeteo.dataframe import to_dataframe
+
+        df = to_dataframe(_daily(temperature_2m_max=[1.0, 2.0], uv_index_max=[None, None]))
+        assert "uv_index_max" in df.columns
+        assert df["uv_index_max"].isna().all()
+
+    def test_include_empty_restores_all_fields(self):
+        pytest.importorskip("pandas")
+        from openmeteo.dataframe import to_dataframe
+
+        df = to_dataframe(_daily(temperature_2m_max=[1.0, 2.0]), include_empty=True)
+        assert set(DailyData.model_fields) == set(df.columns)
+
+    def test_current_excludes_none_fields(self):
+        pytest.importorskip("pandas")
+        from openmeteo.dataframe import to_dataframe
+
+        response = CurrentResponse(
+            latitude=55.75,
+            longitude=37.62,
+            elevation=130.0,
+            generationtime_ms=0.5,
+            utc_offset_seconds=10800,
+            timezone="Europe/Moscow",
+            timezone_abbreviation="MSK",
+            current_units=CurrentUnits(),
+            current=CurrentData(time="2024-01-01T12:00", interval=900, temperature_2m=-5.0),
+        )
+        df = to_dataframe(response)
+        assert list(df.columns) == ["time", "interval", "temperature_2m"]
+
+    def test_sunrise_with_none_values(self):
+        pd = pytest.importorskip("pandas")
+        from openmeteo.dataframe import to_dataframe
+
+        df = to_dataframe(_daily(sunrise=["2024-01-01T08:00", None], sunset=[None, "2024-01-02T16:00"]))
+        assert pd.isna(df["sunrise"].iloc[1])
+        assert df["sunset"].iloc[1] == pd.Timestamp("2024-01-02T16:00")
