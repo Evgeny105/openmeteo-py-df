@@ -25,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,dataframe]"
+          pip install -e ".[dev,dataframe,redis]"
       
       - name: Run tests with coverage
         run: pytest tests/ -v --cov=openmeteo --cov-report=xml
